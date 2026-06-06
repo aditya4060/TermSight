@@ -6,8 +6,6 @@
  * POST /admin/seed      — inserts mock demo data
  */
 import { Router, Request, Response } from "express";
-import { readFileSync } from "fs";
-import { join } from "path";
 import { pool } from "../db.js";
 import { mockScrapeResults } from "../mockData.js";
 import { scorePrivacy, calculateAdjustedScore } from "../scoring.js";
@@ -30,37 +28,109 @@ function checkSecret(req: Request, res: Response): boolean {
   return true;
 }
 
+// SQL is inlined here so it works on Vercel's serverless runtime where
+// the filesystem does not include arbitrary project files at runtime.
+const MIGRATION_SQL = `
+CREATE TABLE IF NOT EXISTS domain_profiles (
+  domain                  TEXT PRIMARY KEY,
+  status                  TEXT NOT NULL DEFAULT 'processing',
+  score                   INTEGER,
+  grade                   TEXT,
+  adjusted_score          INTEGER,
+  adjusted_grade          TEXT,
+  transparency_score      INTEGER,
+  data_sensitivity_score  INTEGER,
+  red_flags_count         INTEGER DEFAULT 0,
+  amber_flags_count       INTEGER DEFAULT 0,
+  green_flags_count       INTEGER DEFAULT 0,
+  summary                 TEXT,
+  policy_urls             JSONB DEFAULT '[]',
+  extraction              JSONB,
+  category_breakdown      JSONB DEFAULT '{}',
+  flags                   JSONB DEFAULT '{"red":[],"amber":[],"green":[]}',
+  evidence                JSONB DEFAULT '[]',
+  error_message           TEXT,
+  freshness_status        TEXT,
+  is_stale                BOOLEAN DEFAULT FALSE,
+  last_checked_at         TIMESTAMPTZ,
+  next_check_at           TIMESTAMPTZ,
+  policy_changed_at       TIMESTAMPTZ,
+  current_version         INTEGER DEFAULT 1,
+  analyzed_at             TIMESTAMPTZ,
+  created_at              TIMESTAMPTZ DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_domain_profiles_status ON domain_profiles(status);
+CREATE INDEX IF NOT EXISTS idx_domain_profiles_next_check ON domain_profiles(next_check_at);
+
+CREATE TABLE IF NOT EXISTS domain_dependencies (
+  id                  BIGSERIAL PRIMARY KEY,
+  parent_domain       TEXT NOT NULL,
+  dependency_domain   TEXT NOT NULL,
+  service_name        TEXT,
+  purpose             TEXT,
+  risk_category       TEXT,
+  policy_url          TEXT,
+  terms_url           TEXT,
+  dependency_score    INTEGER,
+  dependency_grade    TEXT,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(parent_domain, dependency_domain, service_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deps_parent ON domain_dependencies(parent_domain);
+
+CREATE TABLE IF NOT EXISTS policy_documents (
+  id               BIGSERIAL PRIMARY KEY,
+  domain           TEXT NOT NULL,
+  policy_url       TEXT NOT NULL,
+  policy_type      TEXT,
+  content_hash     TEXT,
+  extracted_hash   TEXT,
+  last_scraped_at  TIMESTAMPTZ,
+  last_changed_at  TIMESTAMPTZ,
+  status           TEXT DEFAULT 'active',
+  created_at       TIMESTAMPTZ DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(domain, policy_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_docs_domain ON policy_documents(domain);
+
+CREATE TABLE IF NOT EXISTS policy_versions (
+  id                   BIGSERIAL PRIMARY KEY,
+  policy_document_id   BIGINT REFERENCES policy_documents(id),
+  domain               TEXT NOT NULL,
+  policy_url           TEXT NOT NULL,
+  version_number       INTEGER NOT NULL,
+  content_hash         TEXT NOT NULL,
+  extracted_hash       TEXT,
+  markdown_snapshot    TEXT,
+  extraction           JSONB,
+  score                INTEGER,
+  grade                TEXT,
+  created_at           TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_versions_domain ON policy_versions(domain);
+`;
+
 // POST /admin/migrate
 router.post("/migrate", async (req: Request, res: Response) => {
   if (!checkSecret(req, res)) return;
 
+  const client = await pool.connect();
   try {
-    // Try reading the SQL file; on Vercel it's bundled via includeFiles
-    let sql: string;
-    try {
-      sql = readFileSync(join(process.cwd(), "migrations/001_init.sql"), "utf8");
-    } catch {
-      // Fallback path when running from the api/ directory on Vercel
-      sql = readFileSync(
-        join(process.cwd(), "../migrations/001_init.sql"),
-        "utf8"
-      );
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(sql);
-      await client.query("COMMIT");
-      res.json({ ok: true, message: "Migration completed" });
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+    await client.query("BEGIN");
+    await client.query(MIGRATION_SQL);
+    await client.query("COMMIT");
+    res.json({ ok: true, message: "Migration completed" });
   } catch (err) {
+    await client.query("ROLLBACK");
     res.status(500).json({ error: (err as Error).message });
+  } finally {
+    client.release();
   }
 });
 
