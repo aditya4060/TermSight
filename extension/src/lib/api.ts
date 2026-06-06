@@ -90,7 +90,7 @@ export interface PolicyExtraction {
 
 export interface DomainProfile {
   domain: string;
-  status: "processing" | "ready" | "error" | "not_found";
+  status: "processing" | "ready" | "error" | "unavailable" | "not_found";
   score?: number | null;
   grade?: string | null;
   adjusted_score?: number | null;

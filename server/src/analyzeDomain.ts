@@ -2,11 +2,11 @@ import { query } from "./db.js";
 import { normalizeDomain, domainToHomepage } from "./normalize.js";
 import { firecrawlMap, firecrawlScrapePolicy } from "./firecrawl.js";
 import { pickPolicyUrls } from "./policyPicker.js";
-import { scorePrivacy, calculateAdjustedScore, scoreToGrade } from "./scoring.js";
+import { scorePrivacy, calculateAdjustedScore } from "./scoring.js";
 import { analyzeDependencies } from "./dependencyAnalyzer.js";
 import { hashPolicyMarkdown } from "./hash.js";
 import { isMockMode } from "./env.js";
-import { getMockScrapeResult } from "./mockData.js";
+import { mockScrapeResults } from "./mockData.js";
 import type { DomainProfileRow } from "./types.js";
 
 /** In-memory set of domains currently being analyzed (prevents duplicate jobs). */
@@ -31,6 +31,16 @@ async function insertProcessingStub(domain: string): Promise<void> {
   );
 }
 
+/** Mark profile as unavailable — policy could not be found or scraped. */
+async function markUnavailable(domain: string, message: string): Promise<void> {
+  await query(
+    `UPDATE domain_profiles
+     SET status = 'unavailable', error_message = $2, updated_at = now()
+     WHERE domain = $1`,
+    [domain, message]
+  );
+}
+
 /** Mark profile as error in DB. */
 async function markError(domain: string, message: string): Promise<void> {
   await query(
@@ -39,6 +49,21 @@ async function markError(domain: string, message: string): Promise<void> {
      WHERE domain = $1`,
     [domain, message]
   );
+}
+
+/**
+ * In mock mode, only return real mock data for the 5 explicitly defined demo
+ * domains. Every other domain gets "unavailable" — we never fabricate scores
+ * for real websites that haven't been analyzed.
+ */
+function getMockDataForDomain(domain: string) {
+  // Exact match
+  if (mockScrapeResults[domain]) return mockScrapeResults[domain];
+  // Subdomain / partial match (e.g. "www.notion.so" → "notion.so")
+  for (const [key, val] of Object.entries(mockScrapeResults)) {
+    if (domain.endsWith(`.${key}`) || key.endsWith(`.${domain}`)) return val;
+  }
+  return null;
 }
 
 /** Run the full analysis pipeline for a domain. */
@@ -53,9 +78,60 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
     await insertProcessingStub(domain);
     console.log(`[analyze] Starting analysis for ${domain} (depth=${depth})`);
 
+    // ── Mock mode: only serve pre-defined demo domains ──────────────────────
+    if (isMockMode) {
+      const mockData = getMockDataForDomain(domain);
+      if (!mockData) {
+        await markUnavailable(
+          domain,
+          "Mock mode is active. Only the 5 demo domains are available. Add a Firecrawl API key to analyze real websites."
+        );
+        return;
+      }
+      // Use the pre-defined mock extraction directly
+      const scored = scorePrivacy(mockData.extraction);
+      const deps = depth === 0
+        ? await analyzeDependencies(domain, mockData.extraction.third_party_services, depth)
+        : [];
+      const { adjusted_score, adjusted_grade } = calculateAdjustedScore(
+        scored.privacy_score,
+        deps.map((d) => ({ risk_category: d.risk_category, dependency_grade: d.dependency_grade }))
+      );
+      const nextCheck = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      await query(
+        `UPDATE domain_profiles SET
+           status = 'ready', score = $2, grade = $3, adjusted_score = $4, adjusted_grade = $5,
+           transparency_score = $6, data_sensitivity_score = $7,
+           red_flags_count = $8, amber_flags_count = $9, green_flags_count = $10,
+           summary = $11, policy_urls = $12, extraction = $13,
+           category_breakdown = $14, flags = $15, evidence = $16,
+           freshness_status = 'fresh', is_stale = false,
+           last_checked_at = now(), next_check_at = $17, analyzed_at = now(),
+           updated_at = now(), error_message = null
+         WHERE domain = $1`,
+        [
+          domain,
+          scored.privacy_score, scored.privacy_grade,
+          adjusted_score, adjusted_grade,
+          scored.transparency_score, scored.data_sensitivity_score,
+          scored.red_flags_count, scored.amber_flags_count, scored.green_flags_count,
+          mockData.extraction.summary,
+          JSON.stringify([`https://${domain}/privacy`]),
+          JSON.stringify(mockData.extraction),
+          JSON.stringify(scored.category_breakdown),
+          JSON.stringify(scored.flags),
+          JSON.stringify(mockData.extraction.evidence),
+          nextCheck.toISOString(),
+        ]
+      );
+      console.log(`[analyze] ✅ ${domain} (mock) → ${scored.privacy_grade}`);
+      return;
+    }
+
+    // ── Real Firecrawl mode ──────────────────────────────────────────────────
     const homepageUrl = domainToHomepage(domain);
 
-    // ── Step 1: Discover policy URLs ────────────────────────────────────────
+    // Step 1: Discover policy URLs
     let links: string[] = [];
     try {
       links = await firecrawlMap(homepageUrl);
@@ -65,14 +141,11 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
 
     const policyUrls = pickPolicyUrls(links);
     if (policyUrls.length === 0) {
-      // Fallback: try common paths
       policyUrls.push(`${homepageUrl}/privacy`, `${homepageUrl}/terms`);
     }
-
     console.log(`[analyze] Policy URLs for ${domain}:`, policyUrls);
 
-    // ── Step 2: Scrape + extract ─────────────────────────────────────────────
-    // Try each policy URL; use the first successful extraction
+    // Step 2: Scrape + extract
     let markdown = "";
     let extraction = null;
     let successUrl = "";
@@ -89,34 +162,31 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
       }
     }
 
+    // If scraping failed entirely, mark as unavailable — never show fabricated data
     if (!extraction) {
-      // Real Firecrawl failed for all URLs — fall back to mock data so the
-      // extension always gets a result rather than a permanent error state.
-      console.warn(`[analyze] All scraping attempts failed for ${domain}, using mock fallback`);
-      const fallback = getMockScrapeResult(domain);
-      markdown = fallback.markdown;
-      extraction = fallback.extraction;
+      await markUnavailable(
+        domain,
+        "Could not retrieve or parse the privacy policy for this website. The policy may be behind a login or not publicly accessible."
+      );
+      return;
     }
 
-    // ── Step 3: Score ────────────────────────────────────────────────────────
+    // Step 3: Score
     const scored = scorePrivacy(extraction);
 
-    // ── Step 4: Dependencies ─────────────────────────────────────────────────
+    // Step 4: Dependencies
     let dependencies: Awaited<ReturnType<typeof analyzeDependencies>> = [];
     if (depth === 0) {
       dependencies = await analyzeDependencies(domain, extraction.third_party_services, depth);
     }
 
-    // ── Step 5: Adjusted score ───────────────────────────────────────────────
+    // Step 5: Adjusted score
     const { adjusted_score, adjusted_grade } = calculateAdjustedScore(
       scored.privacy_score,
-      dependencies.map((d) => ({
-        risk_category: d.risk_category,
-        dependency_grade: d.dependency_grade,
-      }))
+      dependencies.map((d) => ({ risk_category: d.risk_category, dependency_grade: d.dependency_grade }))
     );
 
-    // ── Step 6: Store policy document & hash ─────────────────────────────────
+    // Step 6: Store policy document hash for change detection
     const contentHash = hashPolicyMarkdown(markdown);
     if (successUrl) {
       await query(
@@ -128,47 +198,25 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
       );
     }
 
-    // ── Step 7: Save profile ─────────────────────────────────────────────────
-    const now = new Date();
-    const nextCheck = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
+    // Step 7: Save profile
+    const nextCheck = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     await query(
       `UPDATE domain_profiles SET
-         status = 'ready',
-         score = $2,
-         grade = $3,
-         adjusted_score = $4,
-         adjusted_grade = $5,
-         transparency_score = $6,
-         data_sensitivity_score = $7,
-         red_flags_count = $8,
-         amber_flags_count = $9,
-         green_flags_count = $10,
-         summary = $11,
-         policy_urls = $12,
-         extraction = $13,
-         category_breakdown = $14,
-         flags = $15,
-         evidence = $16,
-         freshness_status = 'fresh',
-         is_stale = false,
-         last_checked_at = now(),
-         next_check_at = $17,
-         analyzed_at = now(),
-         updated_at = now(),
-         error_message = null
+         status = 'ready', score = $2, grade = $3, adjusted_score = $4, adjusted_grade = $5,
+         transparency_score = $6, data_sensitivity_score = $7,
+         red_flags_count = $8, amber_flags_count = $9, green_flags_count = $10,
+         summary = $11, policy_urls = $12, extraction = $13,
+         category_breakdown = $14, flags = $15, evidence = $16,
+         freshness_status = 'fresh', is_stale = false,
+         last_checked_at = now(), next_check_at = $17, analyzed_at = now(),
+         updated_at = now(), error_message = null
        WHERE domain = $1`,
       [
         domain,
-        scored.privacy_score,
-        scored.privacy_grade,
-        adjusted_score,
-        adjusted_grade,
-        scored.transparency_score,
-        scored.data_sensitivity_score,
-        scored.red_flags_count,
-        scored.amber_flags_count,
-        scored.green_flags_count,
+        scored.privacy_score, scored.privacy_grade,
+        adjusted_score, adjusted_grade,
+        scored.transparency_score, scored.data_sensitivity_score,
+        scored.red_flags_count, scored.amber_flags_count, scored.green_flags_count,
         extraction.summary,
         JSON.stringify(policyUrls),
         JSON.stringify(extraction),
@@ -179,9 +227,7 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
       ]
     );
 
-    console.log(
-      `[analyze] ✅ ${domain} → score=${scored.privacy_score} (${scored.privacy_grade}), adjusted=${adjusted_score} (${adjusted_grade})`
-    );
+    console.log(`[analyze] ✅ ${domain} → ${scored.privacy_grade} (adjusted: ${adjusted_grade})`);
   } catch (err) {
     const message = (err as Error).message ?? "Unknown error";
     console.error(`[analyze] ❌ Failed for ${domain}:`, message);
@@ -199,28 +245,16 @@ export async function triggerAnalysis(inputUrl: string): Promise<{
 }> {
   const domain = normalizeDomain(inputUrl);
 
-  // Return existing profile if it exists and is not an error
   const existing = await getDomainProfile(domain);
-  if (existing && existing.status === "ready") {
-    return { domain, status: "ready", profile: existing };
+  if (existing && (existing.status === "ready" || existing.status === "unavailable")) {
+    return { domain, status: existing.status, profile: existing };
   }
   if (existing && existing.status === "processing") {
     return { domain, status: "processing", profile: existing };
   }
 
-  if (isMockMode) {
-    // Mock analysis is instant (< 1s) — run synchronously so Vercel serverless
-    // functions don't terminate before the result is written to the database.
-    await analyzeDomain(domain);
-    const profile = await getDomainProfile(domain);
-    return { domain, status: profile?.status ?? "error", profile: profile ?? null };
-  }
-
-  // Real Firecrawl mode: analysis can take 30–120s.
-  // On Vercel we still run it in-request (awaited) so the function stays alive.
-  // The function timeout in vercel.json is set to 60s to accommodate this.
-  // For domains that exceed the timeout the extension will poll and eventually
-  // get the cached result on retry.
+  // Run synchronously — Vercel serverless functions terminate after response,
+  // so we must complete analysis within the same request lifecycle.
   await analyzeDomain(domain);
   const profile = await getDomainProfile(domain);
   return { domain, status: profile?.status ?? "error", profile: profile ?? null };

@@ -5,11 +5,13 @@ import type { DomainProfile } from "../lib/api.js";
 import PrivacyFactsCard from "../components/PrivacyFactsCard.js";
 import LoadingState from "../components/LoadingState.js";
 import ErrorState from "../components/ErrorState.js";
+import UnavailableState from "../components/UnavailableState.js";
 
 type PopupState =
   | { phase: "loading" }
   | { phase: "processing"; domain: string }
   | { phase: "ready"; profile: DomainProfile }
+  | { phase: "unavailable"; domain: string; message?: string | null }
   | { phase: "error"; message: string }
   | { phase: "no_url" };
 
@@ -52,6 +54,11 @@ export default function Popup() {
         return;
       }
 
+      if (initial.status === "unavailable") {
+        setState({ phase: "unavailable", domain, message: initial.error_message });
+        return;
+      }
+
       if (initial.status === "error") {
         setState({
           phase: "error",
@@ -72,6 +79,10 @@ export default function Popup() {
 
         if (polled.status === "ready") {
           setState({ phase: "ready", profile: polled });
+          return;
+        }
+        if (polled.status === "unavailable") {
+          setState({ phase: "unavailable", domain, message: polled.error_message });
           return;
         }
         if (polled.status === "error") {
@@ -116,6 +127,10 @@ export default function Popup() {
         </p>
       </div>
     );
+  }
+
+  if (state.phase === "unavailable") {
+    return <UnavailableState domain={state.domain} message={state.message} onRetry={run} />;
   }
 
   if (state.phase === "error") {

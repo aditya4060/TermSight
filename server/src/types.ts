@@ -1,4 +1,4 @@
-export type ProfileStatus = "processing" | "ready" | "error" | "not_found";
+export type ProfileStatus = "processing" | "ready" | "error" | "unavailable" | "not_found";
 export type FreshnessStatus = "fresh" | "stale" | "checking_for_updates" | "updated" | "unchanged";
 
 export interface Flag {
