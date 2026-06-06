@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #1a1a1a;
+    font-family: 'Arial Black', Arial, sans-serif;
+    color: #ffffff;
+    margin: 0;
+    padding: 0;
+    min-width: 380px;
+    min-height: 200px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+}
+
+@layer components {
+  .privacy-card {
+    background: #111111;
+    border: 3px solid #333333;
+    border-radius: 4px;
+    width: 380px;
+    overflow: hidden;
+  }
+
+  .divider-thick {
+    height: 8px;
+    background: #ffffff;
+  }
+
+  .divider-thin {
+    height: 1px;
+    background: #333333;
+  }
+
+  .risk-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    border-bottom: 1px solid #2a2a2a;
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+  }
+
+  .status-badge {
+    font-size: 0.65rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    padding: 2px 6px;
+    border-radius: 2px;
+    text-transform: uppercase;
+  }
+
+  .status-critical {
+    background-color: #ef4444;
+    color: white;
+  }
+
+  .status-warning {
+    background-color: #f59e0b;
+    color: black;
+  }
+
+  .status-good {
+    background-color: #22c55e;
+    color: black;
+  }
+
+  .status-limited {
+    background-color: #6b7280;
+    color: white;
+  }
+
+  .status-disabled {
+    background-color: #374151;
+    color: #9ca3af;
+  }
+
+  .flag-item {
+    padding: 6px 12px;
+    border-bottom: 1px solid #222;
+    font-size: 0.75rem;
+  }
+
+  .flag-title {
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+
+  .flag-evidence {
+    color: #9ca3af;
+    font-size: 0.7rem;
+    font-weight: 400;
+  }
+
+  .dep-card {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    padding: 8px 10px;
+    margin: 4px 8px;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: #111;
+}
+::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 2px;
+}

@@ -1,0 +1,15 @@
+{
+  "name": "privacy-facts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Privacy Facts – ToS & Privacy Translator. Chrome Extension + Node.js backend.",
+  "scripts": {
+    "server": "cd server && npm run dev",
+    "extension": "cd extension && npm run dev",
+    "install:all": "cd server && npm install && cd ../extension && npm install"
+  },
+  "workspaces": [
+    "server",
+    "extension"
+  ]
+}
