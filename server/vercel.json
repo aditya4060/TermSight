@@ -2,17 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/index.ts",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": ["src/**", "migrations/**"]
-      }
+      "src": "vercel-handler.ts",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "api/index.ts"
+      "dest": "vercel-handler.ts"
     }
   ],
   "env": {
