@@ -230,6 +230,51 @@ router.post("/seed", async (req: Request, res: Response) => {
   }
 });
 
+// POST /admin/test-firecrawl — verify Firecrawl key and API format work
+router.post("/test-firecrawl", async (req: Request, res: Response) => {
+  if (!checkSecret(req, res)) return;
+
+  const apiKey = process.env.FIRECRAWL_API_KEY ?? "";
+  const mockMode = process.env.MOCK_MODE === "true" || apiKey === "";
+
+  if (mockMode) {
+    res.json({ ok: false, reason: "MOCK_MODE is active or FIRECRAWL_API_KEY is empty — set a real key and MOCK_MODE=false" });
+    return;
+  }
+
+  try {
+    const scrapeRes = await fetch("https://api.firecrawl.dev/v1/scrape", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        url: "https://example.com/privacy",
+        formats: ["markdown"],
+        onlyMainContent: true,
+        timeout: 15000,
+      }),
+    });
+
+    const body = await scrapeRes.json() as { success?: boolean; error?: string; data?: { markdown?: string } };
+
+    if (!scrapeRes.ok || !body.success) {
+      res.json({ ok: false, status: scrapeRes.status, error: body.error ?? "Firecrawl returned error" });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      status: scrapeRes.status,
+      markdown_length: body.data?.markdown?.length ?? 0,
+      message: "Firecrawl API key is valid and working",
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // POST /admin/purge — remove cached profiles for non-demo domains
 // (clears fake/bad data that was stored before this fix)
 router.post("/purge", async (req: Request, res: Response) => {
