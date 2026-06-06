@@ -34,7 +34,7 @@ The extension **never** talks to Firecrawl directly — your API keys stay on th
 | GitHub | github.com | Free |
 | Vercel | vercel.com | Free |
 | Neon (PostgreSQL) | neon.tech | Free |
-| Firecrawl (optional) | firecrawl.dev | Free tier |
+| Firecrawl | firecrawl.dev | Free tier |
 
 ---
 
