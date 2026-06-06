@@ -1,441 +1,360 @@
-# TermSight
+# Privacy Facts — ToS & Privacy Translator
 
-https://gemini.google.com/share/c76c44e10ecf
+> A Chrome Extension that reads privacy policies so you don't have to.
 
-https://chatgpt.com/share/6a235c88-b1c4-83ea-93f6-77942bf9f867
-
-A Chrome Extension + Node.js backend that automatically analyzes the privacy policies and terms of service of any website you visit, calculates a privacy score, and displays a clear "Privacy Facts" card — like a nutrition label for your data.
+Privacy Facts automatically analyzes the privacy policy and terms of service of any website you visit and shows you a clear, plain-English **Privacy Facts card** — like a nutrition label for your data. It calculates a letter grade (A+ to F), highlights red flags, and even scores the third-party services a website depends on.
 
 ---
 
-## Architecture
+## How It Works
+
+When you visit a website, the extension sends the URL to a backend server. The server finds the privacy policy using Firecrawl, extracts structured risk data using AI, calculates a privacy score, and caches the result. Results are returned to the extension in seconds.
 
 ```
-Chrome Extension (React + Vite + MV3)
-        │
-        │  POST /api/analyze  /  GET /api/profile/:domain
-        ▼
-  Node.js / Express Backend (TypeScript)
-        │
-        ├──► PostgreSQL (cache layer)
-        └──► Firecrawl API (web scraping + AI extraction)
+You visit a website
+       │
+       ▼
+Chrome Extension  ──►  Backend (Vercel)  ──►  Firecrawl (scraping + AI)
+                              │
+                              ▼
+                        PostgreSQL (Neon)
+                        cached results
 ```
 
-The extension **never** talks to Firecrawl directly. All API keys stay on the backend.
+The extension **never** talks to Firecrawl directly — your API keys stay on the server.
 
 ---
 
-## Project Structure
+## Deployment Guide (Vercel + Neon)
 
-```
-privacy-facts/
-├── README.md
-├── .gitignore
-├── docker-compose.yml
-├── package.json
-├── server/
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── .env.example
-│   ├── migrations/
-│   │   └── 001_init.sql
-│   └── src/
-│       ├── index.ts              # Express app entry
-│       ├── db.ts                 # PostgreSQL pool
-│       ├── env.ts                # Typed config
-│       ├── types.ts              # Shared TypeScript types
-│       ├── normalize.ts          # URL/domain normalization
-│       ├── hash.ts               # Policy text hashing
-│       ├── policyPicker.ts       # URL relevance scoring
-│       ├── firecrawl.ts          # Firecrawl API client
-│       ├── extractionSchema.ts   # JSON extraction schema
-│       ├── scoringPolicy.ts      # Scoring rules (exact policy)
-│       ├── scoring.ts            # Score calculator
-│       ├── analyzeDomain.ts      # Main analysis orchestrator
-│       ├── dependencyAnalyzer.ts # Third-party service analysis
-│       ├── freshness.ts          # Cache staleness / change detection
-│       ├── mockData.ts           # Mock responses for dev mode
-│       ├── seed.ts               # Database seeder
-│       ├── scripts/
-│       │   └── migrate.ts        # Migration runner
-│       └── routes/
-│           ├── analyze.ts
-│           └── health.ts
-└── extension/
-    ├── package.json
-    ├── tsconfig.json
-    ├── vite.config.ts
-    ├── tailwind.config.js
-    ├── postcss.config.js
-    ├── index.html
-    ├── public/
-    │   ├── manifest.json
-    │   └── icons/
-    │       ├── icon16.png
-    │       ├── icon48.png
-    │       └── icon128.png
-    └── src/
-        ├── background.ts
-        ├── styles.css
-        ├── main.tsx
-        ├── popup/
-        │   └── Popup.tsx
-        ├── components/
-        │   ├── PrivacyFactsCard.tsx
-        │   ├── RiskRow.tsx
-        │   ├── FlagList.tsx
-        │   ├── DependencyCard.tsx
-        │   ├── LoadingState.tsx
-        │   └── ErrorState.tsx
-        └── lib/
-            ├── api.ts
-            ├── grade.ts
-            └── domain.ts
-```
+### What you need
 
----
-
-## Quick Start (Local Development)
-
-### Prerequisites
-
-- Node.js 18+
-- npm 9+
-- Docker (for local PostgreSQL) — or a managed Postgres URL
-
-### 1. Clone & Install
-
-```bash
-git clone <your-repo>
-cd privacy-facts
-
-# Install root workspace tools (optional helper scripts)
-npm install
-```
-
-### 2. Start PostgreSQL
-
-```bash
-docker-compose up -d
-```
-
-This starts Postgres on `localhost:5432` with:
-- Database: `privacy_facts`
-- User: `postgres`
-- Password: `postgres`
-
-### 3. Configure Backend
-
-```bash
-cd server
-cp .env.example .env
-```
-
-Edit `server/.env`:
-
-```env
-PORT=4000
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/privacy_facts
-FIRECRAWL_API_KEY=         # Leave empty for mock mode
-EXTENSION_ORIGIN=*
-CACHE_TTL_DAYS=7
-MAX_DEPENDENCIES=3
-MAX_DEPENDENCY_DEPTH=1
-MOCK_MODE=true             # Set to true for demo without Firecrawl
-```
-
-### 4. Run Database Migration
-
-```bash
-cd server
-npm install
-npm run migrate
-```
-
-### 5. Seed Demo Data
-
-```bash
-npm run seed
-```
-
-This inserts pre-analyzed profiles for:
-- `randomshop.com` — poor score, has Stripe + Google Analytics dependencies
-- `notion.so` — moderate score
-- `stripe.com` — decent score
-- `google.com` — advertising/analytics risk
-- `example.com` — F score
-
-### 6. Start Backend
-
-```bash
-npm run dev
-```
-
-Backend runs at `http://localhost:4000`.
-
-### 7. Build & Load Extension
-
-```bash
-cd ../extension
-npm install
-npm run dev    # development build with HMR via Vite
-# or
-npm run build  # production build
-```
-
-Then in Chrome:
-1. Navigate to `chrome://extensions`
-2. Enable **Developer mode** (top-right toggle)
-3. Click **Load unpacked**
-4. Select the `extension/dist` folder (after `npm run build`) or the `extension` folder (with `npm run dev` — see Vite/CRXJS docs)
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
+| Account | Link | Cost |
 |---|---|---|
-| `PORT` | `4000` | Backend HTTP port |
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `FIRECRAWL_API_KEY` | — | Firecrawl API key (empty = mock mode) |
-| `EXTENSION_ORIGIN` | `*` | CORS allowed origin for extension |
-| `CACHE_TTL_DAYS` | `7` | Days before a cached profile is considered stale |
-| `MAX_DEPENDENCIES` | `3` | Max third-party services to analyze per domain |
-| `MAX_DEPENDENCY_DEPTH` | `1` | Max recursion depth for dependency analysis |
-| `MOCK_MODE` | `false` | `true` = skip Firecrawl, use mock data |
+| GitHub | github.com | Free |
+| Vercel | vercel.com | Free |
+| Neon (PostgreSQL) | neon.tech | Free |
+| Firecrawl (optional) | firecrawl.dev | Free tier |
 
 ---
 
-## Mock / Demo Mode
-
-Set `MOCK_MODE=true` in `server/.env` to run the entire stack without a Firecrawl API key.
-
-Mock data is defined in `server/src/mockData.ts` and covers:
-- `example.com` → F score, many red flags
-- `randomshop.com` → D score, Stripe + Google Analytics dependencies
-- `notion.so` → B score, moderate privacy
-- `stripe.com` → B+ score
-- `google.com` → C score, advertising risk
-
----
-
-## Database Setup
-
-### Local Docker (Recommended for Dev)
+### Step 1 — Push to GitHub
 
 ```bash
-docker-compose up -d
-```
-
-### Supabase
-
-1. Create a project at [supabase.com](https://supabase.com)
-2. Get the connection string from Settings → Database → Connection string (URI mode, port 5432)
-3. Set `DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres`
-
-### Neon
-
-1. Create a project at [neon.tech](https://neon.tech)
-2. Copy the connection string from the dashboard
-3. Set `DATABASE_URL=<neon-connection-string>`
-
-### Railway
-
-1. Add a PostgreSQL service
-2. Copy the `DATABASE_URL` from the Variables tab
-
----
-
-## Backend Commands
-
-```bash
-cd server
-npm install         # Install dependencies
-npm run migrate     # Run database migrations
-npm run seed        # Seed demo data
-npm run dev         # Start dev server (tsx watch)
-npm run build       # Compile TypeScript
-npm start           # Start compiled server
+git add .
+git commit -m "Initial commit"
+git push
 ```
 
 ---
 
-## Extension Commands
+### Step 2 — Create a Neon database
+
+1. Go to [neon.tech](https://neon.tech) → **Create Project** → name it `privacy-facts`
+2. From the dashboard, go to **Connection Details**
+3. Copy the **Connection string** — it looks like:
+   ```
+   postgresql://neondb_owner:xxxx@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require
+   ```
+   Save this for Step 3.
+
+---
+
+### Step 3 — Deploy the backend to Vercel
+
+1. Go to [vercel.com](https://vercel.com) → **Add New Project** → import your GitHub repo
+2. In the configure screen, set **Root Directory** to `server`
+3. Under **Environment Variables**, add all of these:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Your Neon connection string from Step 2 |
+| `FIRECRAWL_API_KEY` | Your Firecrawl key — or leave empty to use mock mode |
+| `MOCK_MODE` | `true` if no Firecrawl key, `false` if you have one |
+| `EXTENSION_ORIGIN` | `*` |
+| `CACHE_TTL_DAYS` | `7` |
+| `MAX_DEPENDENCIES` | `3` |
+| `MAX_DEPENDENCY_DEPTH` | `1` |
+| `ADMIN_SECRET` | Any strong password you make up (e.g. `mySecret2026!`) |
+| `VERCEL` | `1` |
+
+4. Click **Deploy** and wait about 30 seconds.
+
+Your backend URL will be something like `https://privacy-facts-xyz.vercel.app`. Save it.
+
+---
+
+### Step 4 — Set up the database (run once)
+
+Replace `YOUR-BACKEND-URL` and `YOUR-ADMIN-SECRET` with your actual values:
+
+```bash
+# Create the database tables
+curl -X POST https://YOUR-BACKEND-URL/admin/migrate \
+  -H "Content-Type: application/json" \
+  -H "x-admin-secret: YOUR-ADMIN-SECRET" \
+  -d '{}'
+```
+
+Expected response:
+```json
+{ "ok": true, "message": "Migration completed" }
+```
+
+---
+
+### Step 5 — Seed demo data (recommended)
+
+This pre-loads results for 5 demo domains so the extension works instantly:
+
+```bash
+curl -X POST https://YOUR-BACKEND-URL/admin/seed \
+  -H "Content-Type: application/json" \
+  -H "x-admin-secret: YOUR-ADMIN-SECRET" \
+  -d '{}'
+```
+
+Expected response:
+```json
+{ "ok": true, "seeded": ["example.com","randomshop.com","notion.so","stripe.com","google.com"] }
+```
+
+---
+
+### Step 6 — Build the Chrome extension
 
 ```bash
 cd extension
-npm install         # Install dependencies
-npm run dev         # Start Vite dev server (HMR)
-npm run build       # Production build → extension/dist/
-npm run preview     # Preview production build
+
+# Set your backend URL
+echo "VITE_API_BASE=https://YOUR-BACKEND-URL" > .env.production
+
+# Build
+npm install
+npm run build
+```
+
+Verify the URL was included:
+```bash
+grep -o '"https://[^"]*vercel[^"]*"' dist/assets/grade-*.js
 ```
 
 ---
 
-## Loading the Extension in Chrome
+### Step 7 — Install the extension in Chrome
 
-1. Run `npm run build` in `extension/`
-2. Open `chrome://extensions`
-3. Enable **Developer mode** (toggle top-right)
-4. Click **Load unpacked**
-5. Select `extension/dist/`
-6. The Privacy Facts icon appears in your toolbar
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked**
+4. Select the `extension/dist/` folder
 
-For **development with hot reload** using CRXJS:
-1. Run `npm run dev` in `extension/`
-2. Load unpacked from `extension/dist/` (CRXJS outputs there)
-3. Changes reload automatically
+The Privacy Facts icon appears in your Chrome toolbar.
 
 ---
 
-## How to Deploy Backend
+### Step 8 — Test it
 
-### Render
+Visit these seeded sites and click the extension icon:
 
-1. Create a new **Web Service** from your repo
-2. Set **Root Directory** to `server`
-3. **Build Command**: `npm install && npm run build`
-4. **Start Command**: `npm start`
-5. Add environment variables in the Render dashboard
-6. Add a **PostgreSQL** database service and copy the `DATABASE_URL`
-
-### Railway
-
-1. New project → Deploy from GitHub repo
-2. Add a PostgreSQL plugin
-3. Set the environment variables
-4. Railway auto-detects Node.js — set start command to `npm start`
-
----
-
-## How Scoring Works
-
-The privacy score starts at **100** and applies deductions/bonuses across 7 categories:
-
-| Category | Max Deduction | Max Bonus |
+| Website | Expected Grade | Notes |
 |---|---|---|
-| Data Collection | -25 | — |
-| Data Sharing | -30 | — |
-| Data Retention | varies | +2 |
-| Tracking & Surveillance | -10 | — |
-| Legal Fairness | -10 | — |
-| User Rights | — | +15 |
-| Security Practices | — | +10 |
-
-**Grade Mapping:**
-- A+ = 90–100
-- A = 85–89
-- B = 70–74
-- C = 55–59
-- D = 40–49
-- F = 0–39
-
-Three additional scores are calculated:
-- **Transparency Score** (0–100): How clearly the policy explains itself
-- **Data Sensitivity Score** (0–100): How sensitive the data collected is
-- **Adjusted Score**: Main score minus penalties for risky third-party dependencies
+| `https://notion.so` | B | Perpetual content license flag |
+| `https://stripe.com` | B+ | Strong security practices |
+| `https://google.com` | C | Cross-site tracking, advertising |
+| `https://randomshop.com` | D | Stripe + Google Analytics dependencies |
+| `https://example.com` | F | Worst-case scenario |
 
 ---
 
-## How Third-Party Dependency Analysis Works
+### Redeploying after changes
 
-1. Firecrawl extracts a list of `third_party_services` from the policy text
-2. The dependency analyzer filters for high-risk service categories (payments, analytics, advertising, identity verification, AI processing, data storage)
-3. Up to `MAX_DEPENDENCIES` (default 3) services are analyzed
-4. Each dependency's own privacy policy is analyzed at depth 1 (no further recursion)
-5. Dependency scores penalize the main domain's **adjusted score**:
-   - Advertising partner with grade C or worse: -5
-   - Analytics partner with grade C or worse: -3
-   - Payments partner with grade D/F: -3
-   - AI processing with grade C or worse: -4
-6. Maximum total penalty from dependencies: 15 points
+**Backend changes** → push to GitHub, Vercel auto-deploys.
+
+**Extension changes:**
+```bash
+cd extension && npm run build
+# Then in chrome://extensions → click the refresh icon on Privacy Facts
+```
 
 ---
 
-## How Policy Change Detection Works
+## Features
 
-1. Every domain profile stores hashes of its policy documents in `policy_documents`
-2. When a profile is stale (older than `CACHE_TTL_DAYS`), a freshness check is triggered
-3. The backend scrapes the policy page again (markdown only, `maxAge: 0` to bypass Firecrawl cache)
-4. The new markdown is normalized (whitespace, lowercase, "last updated" lines removed) and hashed with SHA-256
-5. If the hash **matches**, only `last_checked_at` is updated (cheap operation)
-6. If the hash **changed**, a `policy_versions` snapshot is saved and full re-extraction runs
-7. The extension sees `is_stale: true` and `freshness_status: "checking_for_updates"` while the background refresh is in flight
+- **Privacy grade** — A+ to F score based on 7 categories
+- **Plain-English flags** — red, amber, and green flags with evidence quotes from the policy
+- **Third-party dependency analysis** — scores the services your site depends on (Stripe, Google Analytics, etc.)
+- **Adjusted score** — main score penalized by risky dependencies
+- **Policy change detection** — detects when a privacy policy changes and re-analyzes
+- **Mock mode** — works fully without a Firecrawl API key (great for demos)
 
 ---
 
-## API Reference
+## Local Development
 
-### `GET /health`
-```json
-{ "ok": true, "service": "privacy-facts-api" }
+### Requirements
+
+- Node.js 18+
+- Docker (for local Postgres)
+
+### Setup
+
+```bash
+# Start local database
+docker-compose up -d
+
+# Backend
+cd server
+cp .env.example .env     # set MOCK_MODE=true for local dev
+npm install
+npm run migrate
+npm run seed
+npm run dev              # runs at http://localhost:4000
+
+# Extension (in a new terminal)
+cd extension
+npm install
+npm run dev
 ```
 
-### `POST /api/analyze`
-```json
-{ "url": "https://example.com/any/page" }
-```
-Returns the domain profile (may be `status: "processing"` on first request).
+Load the extension from `extension/dist/` in `chrome://extensions`.
 
-### `GET /api/profile/:domain`
-Returns full profile including dependencies.
+---
 
-### `POST /api/analyze-now`
-Developer route — forces immediate full re-analysis.
-```json
-{ "url": "https://example.com" }
-```
+## API Keys Reference
 
-### `POST /api/freshness/check/:domain`
-Developer route — triggers a freshness/change-detection check.
+| Key | Where to get it | Where to add it |
+|---|---|---|
+| `DATABASE_URL` | Neon dashboard → Connection Details | Vercel env vars |
+| `FIRECRAWL_API_KEY` | [firecrawl.dev](https://firecrawl.dev) → Dashboard → API Keys | Vercel env vars |
+| `ADMIN_SECRET` | Make it up (any strong string) | Vercel env vars + your `curl` commands |
+
+> **No Firecrawl key?** Set `MOCK_MODE=true` and `FIRECRAWL_API_KEY=` (empty). The app uses built-in mock data and works fully for demos.
 
 ---
 
 ## Troubleshooting
 
-**Extension shows "Error" state**
-- Confirm backend is running: `curl http://localhost:4000/health`
-- Check `EXTENSION_ORIGIN` allows the extension origin (use `*` for dev)
-
-**"processing" never becomes "ready"**
-- Check server logs for Firecrawl errors
-- Enable `MOCK_MODE=true` to bypass Firecrawl
-
-**Migration fails**
-- Ensure Postgres is running: `docker-compose ps`
-- Check `DATABASE_URL` is correct
-
-**Extension not reflecting localhost backend in production**
-- Update `API_BASE` in `extension/src/lib/api.ts` to your deployed backend URL
-- Rebuild the extension
-
-**CORS errors**
-- Set `EXTENSION_ORIGIN=*` in server `.env` for development
+| Problem | Fix |
+|---|---|
+| Extension shows "Analysis Failed" | Check that `VITE_API_BASE` in `.env.production` is your real Vercel URL (not the placeholder). Rebuild. |
+| `/admin/migrate` returns 401 | The `x-admin-secret` header must exactly match `ADMIN_SECRET` in Vercel env vars |
+| `/health` shows `"db":"error"` | Neon free tier auto-pauses. Open Neon dashboard → Resume the project |
+| Badge stuck on "..." | Visit one of the 5 seeded domains, or enable `MOCK_MODE=true` on Vercel |
+| Analysis works in `curl` but not extension | Remove the extension in Chrome and re-add it (don't just click refresh — fully remove and reload unpacked) |
 
 ---
 
-## Demo Script for Judges
+## Project Details
 
-```bash
-# 1. Start everything
-docker-compose up -d
-cd server && npm install && npm run migrate && npm run seed && npm run dev &
-cd extension && npm install && npm run build
+### Scoring
 
-# 2. Load extension in Chrome (chrome://extensions → Load unpacked → extension/dist)
+Privacy score starts at **100** and applies deductions and bonuses across 7 categories:
 
-# 3. Visit these sites to demo:
-#    - randomshop.com (D grade, Stripe + GA dependencies)
-#    - google.com     (C grade, advertising flags)
-#    - notion.so      (B grade, moderate)
-#    - stripe.com     (B+ grade)
-#    - example.com    (F grade, red flags)
+| Category | Max Deduction | Max Bonus |
+|---|---|---|
+| Data Collection | −25 | — |
+| Data Sharing | −30 | — |
+| Data Retention | −10 | +2 |
+| Tracking & Surveillance | −10 | — |
+| Legal Fairness | −10 | — |
+| User Rights | — | +15 |
+| Security Practices | — | +10 |
 
-# 4. Show the Privacy Facts popup card
-# 5. Point out: red/amber/green flags, adjusted score, dependency cards
-# 6. Show policy change detection:
-curl -X POST http://localhost:4000/api/freshness/check/notion.so
+**Grade scale:**
+
+| Grade | Score |
+|---|---|
+| A+ | 90–100 |
+| A | 85–89 |
+| B+ | 75–79 |
+| B | 70–74 |
+| C | 55–59 |
+| D | 40–49 |
+| F | 0–39 |
+
+Three additional scores are shown alongside the main grade:
+- **Transparency Score** (0–100) — how clearly the policy explains itself
+- **Data Sensitivity Score** (0–100) — how sensitive the data types collected are
+- **Adjusted Score** — main score minus penalty for risky third-party dependencies (max −15)
+
+### Third-Party Dependency Analysis
+
+1. Firecrawl extracts a list of third-party services from the policy text (e.g. Stripe, Google Analytics)
+2. Up to 3 services are analyzed — prioritizing high-risk categories: payments, analytics, advertising, identity verification, AI processing
+3. Each dependency's own privacy policy is analyzed (depth 1 only, no further recursion)
+4. Dependency grades apply penalties to the main domain's adjusted score:
+
+| Dependency type | Condition | Penalty |
+|---|---|---|
+| Advertising | Grade C or worse | −5 |
+| Analytics | Grade C or worse | −3 |
+| AI Processing | Grade C or worse | −4 |
+| Identity Verification | Grade C or worse | −4 |
+| Payments | Grade D or worse | −3 |
+| Data Storage | Grade D or worse | −2 |
+
+Maximum total dependency penalty: **−15 points**
+
+### Policy Change Detection
+
+1. When a policy is first analyzed, its content is normalized (whitespace, "last updated" lines removed) and hashed with SHA-256
+2. When a cached profile becomes stale (after `CACHE_TTL_DAYS`), the policy is re-scraped
+3. If the hash is unchanged → only `last_checked_at` is updated (cheap)
+4. If the hash changed → a version snapshot is saved, full re-extraction runs, score is updated
+5. The extension shows "Policy changed [date]" when a change is detected
+
+### Project Structure
+
 ```
+privacy-facts/
+├── server/                     # Node.js + Express backend
+│   ├── api/index.ts            # Vercel serverless entry point
+│   ├── vercel.json             # Vercel routing config
+│   ├── migrations/001_init.sql # Database schema
+│   └── src/
+│       ├── index.ts            # Express app
+│       ├── db.ts               # PostgreSQL pool
+│       ├── env.ts              # Typed config
+│       ├── types.ts            # Shared TypeScript interfaces
+│       ├── normalize.ts        # URL/domain normalization
+│       ├── hash.ts             # Policy text hashing
+│       ├── policyPicker.ts     # URL relevance scoring
+│       ├── firecrawl.ts        # Firecrawl API client
+│       ├── extractionSchema.ts # AI extraction schema + prompt
+│       ├── scoringPolicy.ts    # Scoring rules (exact policy)
+│       ├── scoring.ts          # Score calculator
+│       ├── analyzeDomain.ts    # Main analysis orchestrator
+│       ├── dependencyAnalyzer.ts
+│       ├── freshness.ts        # Cache & change detection
+│       ├── mockData.ts         # Mock responses for dev/demo
+│       ├── seed.ts             # Database seeder
+│       └── routes/
+│           ├── analyze.ts      # POST /api/analyze, GET /api/profile/:domain
+│           ├── health.ts       # GET /health
+│           └── admin.ts        # POST /admin/migrate, /admin/seed
+└── extension/                  # Chrome Extension (React + Vite + MV3)
+    ├── public/manifest.json
+    └── src/
+        ├── background.ts       # Service worker (badge updates)
+        ├── popup/Popup.tsx     # Main popup logic
+        └── components/
+            ├── PrivacyFactsCard.tsx
+            ├── RiskRow.tsx
+            ├── FlagList.tsx
+            ├── DependencyCard.tsx
+            ├── LoadingState.tsx
+            └── ErrorState.tsx
+```
+
+### Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Extension | Chrome MV3, React, TypeScript, Vite, Tailwind CSS, @crxjs/vite-plugin |
+| Backend | Node.js, Express, TypeScript, Zod, dotenv |
+| Database | PostgreSQL (Neon / Supabase / Railway / local Docker) |
+| Scraping | Firecrawl (map + scrape with AI JSON extraction) |
+| Hosting | Vercel (serverless) |
 
 ---
 

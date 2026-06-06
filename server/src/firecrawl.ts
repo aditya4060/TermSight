@@ -98,7 +98,7 @@ export async function firecrawlScrapePolicy(
     ],
     onlyMainContent: true,
     onlyCleanContent: true,
-    timeout: 120000,
+    timeout: 45000,
     blockAds: true,
     removeBase64Images: true,
     storeInCache: true,

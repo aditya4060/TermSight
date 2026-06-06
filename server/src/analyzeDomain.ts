@@ -5,6 +5,7 @@ import { pickPolicyUrls } from "./policyPicker.js";
 import { scorePrivacy, calculateAdjustedScore, scoreToGrade } from "./scoring.js";
 import { analyzeDependencies } from "./dependencyAnalyzer.js";
 import { hashPolicyMarkdown } from "./hash.js";
+import { isMockMode } from "./env.js";
 import type { DomainProfileRow } from "./types.js";
 
 /** In-memory set of domains currently being analyzed (prevents duplicate jobs). */
@@ -201,8 +202,20 @@ export async function triggerAnalysis(inputUrl: string): Promise<{
     return { domain, status: "processing", profile: existing };
   }
 
-  // Fire off analysis in background (don't await)
-  setImmediate(() => analyzeDomain(domain));
+  if (isMockMode) {
+    // Mock analysis is instant (< 1s) — run synchronously so Vercel serverless
+    // functions don't terminate before the result is written to the database.
+    await analyzeDomain(domain);
+    const profile = await getDomainProfile(domain);
+    return { domain, status: profile?.status ?? "error", profile: profile ?? null };
+  }
 
-  return { domain, status: "processing", profile: null };
+  // Real Firecrawl mode: analysis can take 30–120s.
+  // On Vercel we still run it in-request (awaited) so the function stays alive.
+  // The function timeout in vercel.json is set to 60s to accommodate this.
+  // For domains that exceed the timeout the extension will poll and eventually
+  // get the cached result on retry.
+  await analyzeDomain(domain);
+  const profile = await getDomainProfile(domain);
+  return { domain, status: profile?.status ?? "error", profile: profile ?? null };
 }
