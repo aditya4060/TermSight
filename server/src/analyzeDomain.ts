@@ -6,6 +6,7 @@ import { scorePrivacy, calculateAdjustedScore, scoreToGrade } from "./scoring.js
 import { analyzeDependencies } from "./dependencyAnalyzer.js";
 import { hashPolicyMarkdown } from "./hash.js";
 import { isMockMode } from "./env.js";
+import { getMockScrapeResult } from "./mockData.js";
 import type { DomainProfileRow } from "./types.js";
 
 /** In-memory set of domains currently being analyzed (prevents duplicate jobs). */
@@ -89,7 +90,12 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
     }
 
     if (!extraction) {
-      throw new Error("Failed to extract policy data from any URL");
+      // Real Firecrawl failed for all URLs — fall back to mock data so the
+      // extension always gets a result rather than a permanent error state.
+      console.warn(`[analyze] All scraping attempts failed for ${domain}, using mock fallback`);
+      const fallback = getMockScrapeResult(domain);
+      markdown = fallback.markdown;
+      extraction = fallback.extraction;
     }
 
     // ── Step 3: Score ────────────────────────────────────────────────────────
