@@ -1,9 +1,9 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { normalizeDomain } from "../normalize.js";
-import { triggerAnalysis, getDomainProfile, analyzeDomain } from "../analyzeDomain.js";
+import { triggerAnalysis, getDomainProfile } from "../analyzeDomain.js";
 import { loadDependencies } from "../dependencyAnalyzer.js";
-import { isProfileStale, triggerFreshnessCheck, checkDomainFreshness } from "../freshness.js";
+import { isProfileStale, triggerFreshnessCheck } from "../freshness.js";
 import type { ApiProfileResponse, DomainProfileRow } from "../types.js";
 
 const router = Router();
@@ -122,40 +122,5 @@ router.get("/profile/:domain", async (req: Request, res: Response) => {
   }
 });
 
-// ── POST /api/analyze-now (developer/demo route) ─────────────────────────────
-router.post("/analyze-now", async (req: Request, res: Response) => {
-  const parsed = analyzeBodySchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.errors[0].message });
-    return;
-  }
-
-  const domain = normalizeDomain(parsed.data.url);
-  res.json({ domain, status: "analysis_started" });
-
-  // Run in background after responding
-  setImmediate(() =>
-    analyzeDomain(domain, 0).catch((e) =>
-      console.error(`[analyze-now] Failed for ${domain}:`, e)
-    )
-  );
-});
-
-// ── POST /api/freshness/check/:domain (developer route) ──────────────────────
-router.post("/freshness/check/:domain", async (req: Request, res: Response) => {
-  const { domain } = req.params;
-  if (!domain) {
-    res.status(400).json({ error: "Domain required" });
-    return;
-  }
-
-  const normalized = normalizeDomain(domain);
-  try {
-    const result = await checkDomainFreshness(normalized);
-    res.json({ domain: normalized, ...result });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
 
 export default router;

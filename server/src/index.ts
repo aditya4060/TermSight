@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { config } from "./env.js";
 import { pool } from "./db.js";
@@ -10,29 +11,44 @@ import adminRouter from "./routes/admin.js";
 // Export app separately so Vercel's serverless handler can import it
 export const app = express();
 
+// Security headers — helmet sets X-Content-Type-Options, X-Frame-Options,
+// Referrer-Policy, X-XSS-Protection, and more automatically.
+app.use(helmet({ contentSecurityPolicy: false })); // CSP disabled — API only, no HTML served
+
 app.use(
   cors({
     origin: config.EXTENSION_ORIGIN === "*" ? "*" : config.EXTENSION_ORIGIN,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-admin-secret"],
   })
 );
-app.use(express.json());
 
-// Rate limiting — prevent abuse of the analysis endpoint
+// Explicit body size cap (prevents request body flooding)
+app.use(express.json({ limit: "16kb" }));
+
+// Rate limiting — prevent API abuse
 const analyzeLimiter = rateLimit({
-  windowMs: 60 * 1000,       // 1 minute window
-  max: 20,                    // 20 requests per IP per minute
+  windowMs: 60 * 1000,  // 1-minute window
+  max: 20,              // 20 requests per IP per minute
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests. Please wait a moment before analyzing more sites." },
-  skip: (req) => req.path === "/health", // never limit health checks
+  skip: (req) => req.path === "/health",
+});
+
+// Tight rate limit on admin routes — prevents brute-forcing ADMIN_SECRET
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15-minute window
+  max: 10,                   // 10 attempts per IP per 15 min
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many admin requests." },
 });
 
 // Routes
 app.use("/", healthRouter);
 app.use("/api", analyzeLimiter, analyzeRouter);
-app.use("/admin", adminRouter);
+app.use("/admin", adminLimiter, adminRouter);
 
 // 404 fallback
 app.use((_req, res) => {
