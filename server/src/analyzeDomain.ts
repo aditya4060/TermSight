@@ -7,12 +7,11 @@ import { analyzeDependencies } from "./dependencyAnalyzer.js";
 import { hashPolicyMarkdown } from "./hash.js";
 import { isMockMode } from "./env.js";
 import { mockScrapeResults } from "./mockData.js";
-import type { DomainProfileRow } from "./types.js";
+import { getKnownPolicyUrls, buildFallbackUrls } from "./knownPolicyUrls.js";
+import type { DomainProfileRow, PolicyExtraction } from "./types.js";
 
-/** In-memory set of domains currently being analyzed (prevents duplicate jobs). */
 const inFlightDomains = new Set<string>();
 
-/** Fetch an existing domain profile from the DB, or null. */
 export async function getDomainProfile(domain: string): Promise<DomainProfileRow | null> {
   const result = await query<DomainProfileRow>(
     `SELECT * FROM domain_profiles WHERE domain = $1`,
@@ -21,7 +20,6 @@ export async function getDomainProfile(domain: string): Promise<DomainProfileRow
   return result.rows[0] ?? null;
 }
 
-/** Insert a "processing" stub so the extension can poll for it. */
 async function insertProcessingStub(domain: string): Promise<void> {
   await query(
     `INSERT INTO domain_profiles (domain, status, flags, category_breakdown, evidence, policy_urls)
@@ -31,42 +29,113 @@ async function insertProcessingStub(domain: string): Promise<void> {
   );
 }
 
-/** Mark profile as unavailable — policy could not be found or scraped. */
 async function markUnavailable(domain: string, message: string): Promise<void> {
   await query(
-    `UPDATE domain_profiles
-     SET status = 'unavailable', error_message = $2, updated_at = now()
+    `UPDATE domain_profiles SET status = 'unavailable', error_message = $2, updated_at = now()
      WHERE domain = $1`,
     [domain, message]
   );
 }
 
-/** Mark profile as error in DB. */
 async function markError(domain: string, message: string): Promise<void> {
   await query(
-    `UPDATE domain_profiles
-     SET status = 'error', error_message = $2, updated_at = now()
+    `UPDATE domain_profiles SET status = 'error', error_message = $2, updated_at = now()
      WHERE domain = $1`,
     [domain, message]
   );
 }
 
-/**
- * In mock mode, only return real mock data for the 5 explicitly defined demo
- * domains. Every other domain gets "unavailable" — we never fabricate scores
- * for real websites that haven't been analyzed.
- */
+/** Only serve pre-defined mock data — never fabricate scores for unknown domains. */
 function getMockDataForDomain(domain: string) {
-  // Exact match
   if (mockScrapeResults[domain]) return mockScrapeResults[domain];
-  // Subdomain / partial match (e.g. "www.notion.so" → "notion.so")
-  for (const [key, val] of Object.entries(mockScrapeResults)) {
-    if (domain.endsWith(`.${key}`) || key.endsWith(`.${domain}`)) return val;
+  const parts = domain.split(".");
+  if (parts.length > 2) {
+    const parent = parts.slice(-2).join(".");
+    if (mockScrapeResults[parent]) return mockScrapeResults[parent];
   }
   return null;
 }
 
-/** Run the full analysis pipeline for a domain. */
+/**
+ * Discover policy URLs for a domain.
+ *
+ * Priority:
+ *   1. Known URL table (instant, no API call)
+ *   2. Firecrawl /map with a short timeout (10s)
+ *   3. Common path patterns as final fallback
+ */
+async function discoverPolicyUrls(domain: string): Promise<string[]> {
+  // 1. Known URLs — skip map entirely for major sites
+  const known = getKnownPolicyUrls(domain);
+  if (known && known.length > 0) {
+    console.log(`[analyze] Using known policy URLs for ${domain}`);
+    return known;
+  }
+
+  // 2. Firecrawl map with a tight timeout
+  const homepageUrl = domainToHomepage(domain);
+  let mapLinks: string[] = [];
+  try {
+    const mapPromise = firecrawlMap(homepageUrl);
+    const timeoutPromise = new Promise<string[]>((_, reject) =>
+      setTimeout(() => reject(new Error("map timeout")), 10_000)
+    );
+    mapLinks = await Promise.race([mapPromise, timeoutPromise]);
+    const picked = pickPolicyUrls(mapLinks);
+    if (picked.length > 0) {
+      console.log(`[analyze] Map discovered ${picked.length} URLs for ${domain}`);
+      return picked.slice(0, 2); // max 2 to stay within time budget
+    }
+  } catch (err) {
+    console.warn(`[analyze] Map failed/timed out for ${domain}:`, (err as Error).message);
+  }
+
+  // 3. Common path fallback
+  console.log(`[analyze] Using common path fallback for ${domain}`);
+  return buildFallbackUrls(domain).slice(0, 3);
+}
+
+/**
+ * Try scraping multiple policy URLs in parallel.
+ * Returns the first successful result, or null if all fail.
+ * Parallel attempts stay within Vercel's time budget much better than sequential.
+ */
+async function scrapeFirstSuccess(
+  urls: string[]
+): Promise<{ markdown: string; extraction: PolicyExtraction; url: string } | null> {
+  // Try the first 2 URLs in parallel
+  const candidates = urls.slice(0, 2);
+
+  const results = await Promise.allSettled(
+    candidates.map(async (url) => {
+      const { markdown, extraction } = await firecrawlScrapePolicy(url);
+      return { markdown, extraction, url };
+    })
+  );
+
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      console.log(`[analyze] Scrape succeeded: ${result.value.url}`);
+      return result.value;
+    }
+    if (result.status === "rejected") {
+      console.warn(`[analyze] Scrape failed:`, (result.reason as Error).message);
+    }
+  }
+
+  // If first 2 failed and there's a 3rd, try it alone
+  if (urls.length > 2) {
+    try {
+      const { markdown, extraction } = await firecrawlScrapePolicy(urls[2]);
+      return { markdown, extraction, url: urls[2] };
+    } catch (err) {
+      console.warn(`[analyze] Fallback scrape failed:`, (err as Error).message);
+    }
+  }
+
+  return null;
+}
+
 export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
   if (inFlightDomains.has(domain)) {
     console.log(`[analyze] Already in-flight for ${domain}, skipping`);
@@ -78,106 +147,53 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
     await insertProcessingStub(domain);
     console.log(`[analyze] Starting analysis for ${domain} (depth=${depth})`);
 
-    // ── Mock mode: only serve pre-defined demo domains ──────────────────────
+    // ── Mock mode: only serve the 5 pre-defined demo domains ────────────────
     if (isMockMode) {
       const mockData = getMockDataForDomain(domain);
       if (!mockData) {
         await markUnavailable(
           domain,
-          "Mock mode is active. Only the 5 demo domains are available. Add a Firecrawl API key to analyze real websites."
+          "Mock mode is active. Only the 5 demo domains are pre-loaded. Add a Firecrawl API key to analyze any website."
         );
         return;
       }
-      // Use the pre-defined mock extraction directly
       const scored = scorePrivacy(mockData.extraction);
-      const deps = depth === 0
-        ? await analyzeDependencies(domain, mockData.extraction.third_party_services, depth)
-        : [];
-      const { adjusted_score, adjusted_grade } = calculateAdjustedScore(
-        scored.privacy_score,
-        deps.map((d) => ({ risk_category: d.risk_category, dependency_grade: d.dependency_grade }))
-      );
-      const nextCheck = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-      await query(
-        `UPDATE domain_profiles SET
-           status = 'ready', score = $2, grade = $3, adjusted_score = $4, adjusted_grade = $5,
-           transparency_score = $6, data_sensitivity_score = $7,
-           red_flags_count = $8, amber_flags_count = $9, green_flags_count = $10,
-           summary = $11, policy_urls = $12, extraction = $13,
-           category_breakdown = $14, flags = $15, evidence = $16,
-           freshness_status = 'fresh', is_stale = false,
-           last_checked_at = now(), next_check_at = $17, analyzed_at = now(),
-           updated_at = now(), error_message = null
-         WHERE domain = $1`,
-        [
-          domain,
-          scored.privacy_score, scored.privacy_grade,
-          adjusted_score, adjusted_grade,
-          scored.transparency_score, scored.data_sensitivity_score,
-          scored.red_flags_count, scored.amber_flags_count, scored.green_flags_count,
-          mockData.extraction.summary,
-          JSON.stringify([`https://${domain}/privacy`]),
-          JSON.stringify(mockData.extraction),
-          JSON.stringify(scored.category_breakdown),
-          JSON.stringify(scored.flags),
-          JSON.stringify(mockData.extraction.evidence),
-          nextCheck.toISOString(),
-        ]
-      );
+      // In mock mode also skip dep analysis for speed
+      const { adjusted_score, adjusted_grade } = calculateAdjustedScore(scored.privacy_score, []);
+      await saveProfile(domain, scored, adjusted_score, adjusted_grade,
+        mockData.extraction, [domain + "/privacy"], mockData.markdown, domain + "/privacy");
       console.log(`[analyze] ✅ ${domain} (mock) → ${scored.privacy_grade}`);
       return;
     }
 
-    // ── Real Firecrawl mode ──────────────────────────────────────────────────
-    const homepageUrl = domainToHomepage(domain);
+    // ── Real mode ─────────────────────────────────────────────────────────────
 
-    // Step 1: Discover policy URLs
-    let links: string[] = [];
-    try {
-      links = await firecrawlMap(homepageUrl);
-    } catch (err) {
-      console.warn(`[analyze] firecrawlMap failed for ${domain}:`, (err as Error).message);
-    }
+    // Step 1: Find policy URLs (fast path for known domains)
+    const policyUrls = await discoverPolicyUrls(domain);
+    console.log(`[analyze] Trying ${policyUrls.length} URLs for ${domain}:`, policyUrls);
 
-    const policyUrls = pickPolicyUrls(links);
-    if (policyUrls.length === 0) {
-      policyUrls.push(`${homepageUrl}/privacy`, `${homepageUrl}/terms`);
-    }
-    console.log(`[analyze] Policy URLs for ${domain}:`, policyUrls);
+    // Step 2: Scrape in parallel
+    const scraped = await scrapeFirstSuccess(policyUrls);
 
-    // Step 2: Scrape + extract
-    let markdown = "";
-    let extraction = null;
-    let successUrl = "";
-
-    for (const url of policyUrls.slice(0, 3)) {
-      try {
-        const result = await firecrawlScrapePolicy(url);
-        markdown = result.markdown;
-        extraction = result.extraction;
-        successUrl = url;
-        break;
-      } catch (err) {
-        console.warn(`[analyze] scrape failed for ${url}:`, (err as Error).message);
-      }
-    }
-
-    // If scraping failed entirely, mark as unavailable — never show fabricated data
-    if (!extraction) {
+    if (!scraped) {
       await markUnavailable(
         domain,
-        "Could not retrieve or parse the privacy policy for this website. The policy may be behind a login or not publicly accessible."
+        "Could not retrieve or parse the privacy policy for this website. The policy may be behind a login, paywalled, or not publicly accessible."
       );
       return;
     }
 
+    const { markdown, extraction, url: successUrl } = scraped;
+
     // Step 3: Score
     const scored = scorePrivacy(extraction);
 
-    // Step 4: Dependencies
+    // Step 4: Dependencies — only analyze if already cached, never add new
+    // latency by scraping fresh dependency domains (too slow for Vercel's 60s limit).
+    // Dependencies will appear once those domains are analyzed independently.
     let dependencies: Awaited<ReturnType<typeof analyzeDependencies>> = [];
     if (depth === 0) {
-      dependencies = await analyzeDependencies(domain, extraction.third_party_services, depth);
+      dependencies = await loadCachedDependencies(domain, extraction);
     }
 
     // Step 5: Adjusted score
@@ -186,45 +202,18 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
       dependencies.map((d) => ({ risk_category: d.risk_category, dependency_grade: d.dependency_grade }))
     );
 
-    // Step 6: Store policy document hash for change detection
-    const contentHash = hashPolicyMarkdown(markdown);
-    if (successUrl) {
-      await query(
-        `INSERT INTO policy_documents (domain, policy_url, policy_type, content_hash, last_scraped_at, last_changed_at)
-         VALUES ($1, $2, 'privacy_terms', $3, now(), now())
-         ON CONFLICT (domain, policy_url) DO UPDATE
-           SET content_hash = $3, last_scraped_at = now(), updated_at = now()`,
-        [domain, successUrl, contentHash]
-      );
-    }
+    // Step 6: Save everything
+    await saveProfile(domain, scored, adjusted_score, adjusted_grade,
+      extraction, policyUrls, markdown, successUrl);
 
-    // Step 7: Save profile
-    const nextCheck = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    // Step 7: Store policy document hash
+    const contentHash = hashPolicyMarkdown(markdown);
     await query(
-      `UPDATE domain_profiles SET
-         status = 'ready', score = $2, grade = $3, adjusted_score = $4, adjusted_grade = $5,
-         transparency_score = $6, data_sensitivity_score = $7,
-         red_flags_count = $8, amber_flags_count = $9, green_flags_count = $10,
-         summary = $11, policy_urls = $12, extraction = $13,
-         category_breakdown = $14, flags = $15, evidence = $16,
-         freshness_status = 'fresh', is_stale = false,
-         last_checked_at = now(), next_check_at = $17, analyzed_at = now(),
-         updated_at = now(), error_message = null
-       WHERE domain = $1`,
-      [
-        domain,
-        scored.privacy_score, scored.privacy_grade,
-        adjusted_score, adjusted_grade,
-        scored.transparency_score, scored.data_sensitivity_score,
-        scored.red_flags_count, scored.amber_flags_count, scored.green_flags_count,
-        extraction.summary,
-        JSON.stringify(policyUrls),
-        JSON.stringify(extraction),
-        JSON.stringify(scored.category_breakdown),
-        JSON.stringify(scored.flags),
-        JSON.stringify(extraction.evidence),
-        nextCheck.toISOString(),
-      ]
+      `INSERT INTO policy_documents (domain, policy_url, policy_type, content_hash, last_scraped_at, last_changed_at)
+       VALUES ($1, $2, 'privacy_terms', $3, now(), now())
+       ON CONFLICT (domain, policy_url) DO UPDATE
+         SET content_hash = $3, last_scraped_at = now(), updated_at = now()`,
+      [domain, successUrl, contentHash]
     );
 
     console.log(`[analyze] ✅ ${domain} → ${scored.privacy_grade} (adjusted: ${adjusted_grade})`);
@@ -237,7 +226,104 @@ export async function analyzeDomain(domain: string, depth = 0): Promise<void> {
   }
 }
 
-/** Entry point from the POST /api/analyze route. */
+/**
+ * Instead of analyzing new dependencies (too slow), look up any of the
+ * third-party services that have already been analyzed and are in our DB.
+ * This means dependencies show up over time as sites get analyzed naturally.
+ */
+async function loadCachedDependencies(
+  domain: string,
+  extraction: PolicyExtraction
+) {
+  const services = extraction.third_party_services ?? [];
+  const importantCategories = new Set([
+    "payments", "analytics", "advertising",
+    "identity_verification", "data_storage", "ai_processing",
+  ]);
+
+  const relevant = services
+    .filter((s) => importantCategories.has(s.risk_category))
+    .slice(0, 3);
+
+  const results = [];
+  for (const service of relevant) {
+    const depDomain = service.domain
+      ? service.domain.replace(/^www\./, "").toLowerCase()
+      : null;
+    if (!depDomain || depDomain === domain) continue;
+
+    try {
+      const existing = await getDomainProfile(depDomain);
+      if (existing?.status === "ready") {
+        // Save the relationship and return it
+        await query(
+          `INSERT INTO domain_dependencies
+             (parent_domain, dependency_domain, service_name, purpose, risk_category,
+              policy_url, terms_url, dependency_score, dependency_grade)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           ON CONFLICT (parent_domain, dependency_domain, service_name) DO UPDATE
+             SET dependency_score=$8, dependency_grade=$9`,
+          [domain, depDomain, service.name, service.purpose, service.risk_category,
+           service.policy_url ?? null, service.terms_url ?? null,
+           existing.score, existing.grade]
+        );
+        results.push({
+          dependency_domain: depDomain,
+          service_name: service.name,
+          purpose: service.purpose,
+          risk_category: service.risk_category as import("./types.js").RiskCategory,
+          policy_url: service.policy_url ?? null,
+          terms_url: service.terms_url ?? null,
+          dependency_score: existing.score,
+          dependency_grade: existing.grade,
+        });
+      }
+    } catch {
+      // Non-critical — skip
+    }
+  }
+  return results;
+}
+
+async function saveProfile(
+  domain: string,
+  scored: ReturnType<typeof scorePrivacy>,
+  adjusted_score: number,
+  adjusted_grade: string,
+  extraction: PolicyExtraction,
+  policyUrls: string[],
+  _markdown: string,
+  _successUrl: string
+) {
+  const nextCheck = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await query(
+    `UPDATE domain_profiles SET
+       status = 'ready', score = $2, grade = $3, adjusted_score = $4, adjusted_grade = $5,
+       transparency_score = $6, data_sensitivity_score = $7,
+       red_flags_count = $8, amber_flags_count = $9, green_flags_count = $10,
+       summary = $11, policy_urls = $12, extraction = $13,
+       category_breakdown = $14, flags = $15, evidence = $16,
+       freshness_status = 'fresh', is_stale = false,
+       last_checked_at = now(), next_check_at = $17, analyzed_at = now(),
+       updated_at = now(), error_message = null
+     WHERE domain = $1`,
+    [
+      domain,
+      scored.privacy_score, scored.privacy_grade,
+      adjusted_score, adjusted_grade,
+      scored.transparency_score, scored.data_sensitivity_score,
+      scored.red_flags_count, scored.amber_flags_count, scored.green_flags_count,
+      extraction.summary,
+      JSON.stringify(policyUrls),
+      JSON.stringify(extraction),
+      JSON.stringify(scored.category_breakdown),
+      JSON.stringify(scored.flags),
+      JSON.stringify(extraction.evidence ?? []),
+      nextCheck.toISOString(),
+    ]
+  );
+}
+
 export async function triggerAnalysis(inputUrl: string): Promise<{
   domain: string;
   status: string;
@@ -253,8 +339,6 @@ export async function triggerAnalysis(inputUrl: string): Promise<{
     return { domain, status: "processing", profile: existing };
   }
 
-  // Run synchronously — Vercel serverless functions terminate after response,
-  // so we must complete analysis within the same request lifecycle.
   await analyzeDomain(domain);
   const profile = await getDomainProfile(domain);
   return { domain, status: profile?.status ?? "error", profile: profile ?? null };

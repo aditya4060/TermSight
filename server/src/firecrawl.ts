@@ -102,7 +102,7 @@ export async function firecrawlScrapePolicy(
       prompt: extractionPrompt,
     },
     onlyMainContent: true,
-    timeout: 45000,
+    timeout: 28000,
     blockAds: true,
     removeBase64Images: true,
   });
