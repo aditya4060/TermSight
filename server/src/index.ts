@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { config } from "./env.js";
 import { pool } from "./db.js";
 import healthRouter from "./routes/health.js";
@@ -18,9 +19,19 @@ app.use(
 );
 app.use(express.json());
 
+// Rate limiting — prevent abuse of the analysis endpoint
+const analyzeLimiter = rateLimit({
+  windowMs: 60 * 1000,       // 1 minute window
+  max: 20,                    // 20 requests per IP per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please wait a moment before analyzing more sites." },
+  skip: (req) => req.path === "/health", // never limit health checks
+});
+
 // Routes
 app.use("/", healthRouter);
-app.use("/api", analyzeRouter);
+app.use("/api", analyzeLimiter, analyzeRouter);
 app.use("/admin", adminRouter);
 
 // 404 fallback
